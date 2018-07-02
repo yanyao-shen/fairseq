@@ -385,16 +385,36 @@ hooks.onCheckpoint = argcheck{
                 stopTraining = true
             end
 
+            -- annealing the weight ratio of attention
+            --[[
+            if not config.pretrain then
+                if state.epoch % config.attention_interval == 0 then
+                    print('annealing attweight')
+                    print('current weight: ', config.attweight)
+                    config.attweight = (state.epoch/config.attention_interval ) * 0.01
+                else
+                    config.attweight = (math.floor(state.epoch/config.attention_interval) ) * 0.01
+                end
+            else
+                config.attweight = 0
+            end
+            --]]
+
             -- Learning rate annealing
             if annealing and state.epoch >= config.minepochtoanneal
                 and (state._onCheckpoint.isAnnealing
                 or (state._onCheckpoint.prevvalloss
-                    and state._onCheckpoint.prevvalloss <= valloss)) then
+                    and state._onCheckpoint.prevvalloss <= valloss )) then
                 state.optconfig.learningRate =
                     state.optconfig.learningRate / config.lrshrink
+
                 if (config.annealing_type == nil or -- default behavior
                     config.annealing_type == 'fast') then
-                    state._onCheckpoint.isAnnealing = true
+                    if not config.multistepfinetune then
+                        state._onCheckpoint.isAnnealing = true
+                    else
+                        config.freq_embedding = nil -- do not update embedding in finetune period...
+                    end
                 end
             else
                 state._onCheckpoint.prevvalloss = valloss

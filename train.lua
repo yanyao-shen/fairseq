@@ -32,10 +32,12 @@ local cmd = torch.CmdLine()
 cmd:option('-sourcelang', 'de', 'source language')
 cmd:option('-targetlang', 'en', 'target language')
 cmd:option('-datadir', 'data-bin')
-cmd:option('-model', 'avgpool', 'model type {avgpool|blstm|conv|fconv}')
+cmd:option('-model', 'avgpool', 'model type {avgpool|blstm|conv|fconv|fconvatt}')
 cmd:option('-nembed', 256, 'dimension of embeddings and attention')
 cmd:option('-noutembed', 256, 'dimension of the output embeddings')
-cmd:option('-nhid', 256, 'number of hidden units per layer')
+cmd:option('-ninembed', 256, 'dimension of the input embeddings')
+cmd:option('-nhid', 256, 'number of hidden units per layer for encoder')
+cmd:option('-nhiddec', 256, 'number of hidden units per layer for decoder')
 cmd:option('-nlayer', 1, 'number of hidden layers in decoder')
 cmd:option('-nenclayer', 1, 'number of hidden layers in encoder')
 cmd:option('-nagglayer', -1,
@@ -87,6 +89,34 @@ cmd:option('-dropout_tgt', -1, 'dropout on target embeddings')
 cmd:option('-dropout_out', -1, 'dropout on decoder output')
 cmd:option('-dropout_hid', -1, 'dropout between layers')
 cmd:option('-dropout', 0, 'set negative dropout_* options to this value')
+cmd:option('-attweight', 0, 'set self-attention weight')
+cmd:option('-hsplit', 1, 'set number of heads in multi-head attention')
+cmd:option('-istrain', true, 'generate or train')
+cmd:option('-pretrain', false, 'pretrain without annealing')
+cmd:option('-pretrainpath', '', 'path to the pretrained model')
+cmd:option('-attention_interval', 100, 'attention interval')
+cmd:option('-dist_threshold', 0.6, '')
+cmd:option('-dist_decay', 1, '')
+cmd:option('-freq_embedding', 501, '')
+cmd:option('-alg_option', 1, '')
+cmd:option('-architect_option', 1, '')
+cmd:option('-noembedacc', false, '')
+cmd:option('-embedding_option', 1, '')
+cmd:option('-dataembedpath', '/home/drl/fairseq-yanyao/data-embed/', 'path to the pretrained model')
+cmd:option('-onlylowfreq', false, '')
+cmd:option('-lowfreqratio', 3, '')
+cmd:option('-nhid_acc', 256, 'number of hidden units per layer')
+cmd:option('-nhid_acc_dec', 256, 'number of hidden units per layer in decoder')
+cmd:option('-multistepfinetune', false, '')
+cmd:option('-opt', 0, 'option number: 0|1|2|3|4')
+cmd:option('-optenc', 0, 'option number: 0|1')
+cmd:option('-densebn', false, 'dense connection batch normalization option')
+cmd:option('-blocklength', 5, '')
+cmd:option('-keeplayers_enc', 0, '')
+cmd:option('-keeplayers_dec', 0, '')
+cmd:option('-denseatt', false, 'dense connection attention')
+cmd:option('-save_every', 0, '')
+
 
 -- Options for fconv_model
 cmd:option('-cudnnconv', false, 'use cudnn.TemporalConvolution (slower)')
@@ -100,6 +130,10 @@ cmd:option('-fconv_kwidths', '',
     'comma-separated list of kernel widths for conv encoder')
 cmd:option('-fconv_klmwidths', '',
     'comma-separated list of kernel widths for convolutional language model')
+cmd:option('-fconv_nhid_accs', '',
+    'comma-separated list of hidden accumulated units')
+cmd:option('-fconv_nhid_accs_dec', '',
+    'comma-separated list of hidden accumulated units')
 
 
 local config = cmd:parse(arg)
@@ -110,18 +144,23 @@ if config.dropout_out < 0 then config.dropout_out = config.dropout end
 if config.dropout_hid < 0 then config.dropout_hid = config.dropout end
 
 -- parse hidden sizes and kernel widths
-if config.model == 'fconv' then
+if config.model:sub(1,5) == 'fconv'  then
     -- encoder
     config.nhids = utils.parseListOrDefault(
         config.fconv_nhids, config.nenclayer, config.nhid)
     config.kwidths = utils.parseListOrDefault(
         config.fconv_kwidths, config.nenclayer, config.kwidth)
+    config.nhid_accs = utils.parseListOrDefault(
+        config.fconv_nhid_accs, config.nenclayer, config.nhid_acc)
+
 
     -- deconder
     config.nlmhids = utils.parseListOrDefault(
-        config.fconv_nlmhids, config.nlayer, config.nhid)
+        config.fconv_nlmhids, config.nlayer, config.nhiddec)
     config.klmwidths = utils.parseListOrDefault(
         config.fconv_klmwidths, config.nlayer, config.klmwidth)
+    config.nhid_accs_dec = utils.parseListOrDefault(
+        config.fconv_nhid_accs_dec, config.nenclayer, config.nhid_acc_dec)
 end
 
 torch.manualSeed(config.seed)
@@ -131,6 +170,7 @@ cuda.cutorch.manualSeed(config.seed)
 assert(config.ngpus >= 1 and config.ngpus <= cuda.cutorch.getDeviceCount())
 
 -- Effective batchsize equals to the base batchsize * ngpus
+config.batchsizesingle = config.batchsize
 config.batchsize = config.batchsize * config.ngpus
 config.maxbatch = config.maxbatch * config.ngpus
 
@@ -200,6 +240,8 @@ local make_model_fn = function(id)
     return model
 end
 
+
+
 local make_criterion_fn = function(id)
     -- Don't produce losses and gradients for the padding symbol
     local padindex = config.dict:getIndex(config.dict.pad)
@@ -212,9 +254,14 @@ end
 -------------------------------------------------------------------
 -- Torchnet engine setup
 -------------------------------------------------------------------
+print('torchnet engine setup')
+print('config.ngpus: ', config.ngpus)
+--config.ngpus = 1
 engine = tnt.ResumableDPOptimEngine(
-    config.ngpus, thread_init_fn, make_model_fn, make_criterion_fn
+    config.ngpus, thread_init_fn, make_model_fn, make_criterion_fn, config
 )
+
+print('torchnet engine setup -- finish')
 local lossMeter = tnt.AverageValueMeter()
 local checkpointLossMeter = tnt.AverageValueMeter()
 local timeMeter = tnt.TimeMeter{unit = true}
@@ -304,6 +351,7 @@ if not config.nosave then
     saveLastState = hooks.saveStateHook(engine, lastStatePath)
 end
 
+print('engine hooks setup')
 -- Setup engine hooks
 engine.hooks.onStart = function(state)
     if not state.checkpoint then
@@ -341,6 +389,13 @@ local onCheckpoint = hooks.call{
     end,
     saveEpochState,
     saveLastState,
+}
+
+engine.hooks.onEmbedding = hooks.call{
+    function(state)
+        print('entering onEmbedding function')
+        
+    end
 }
 
 engine.hooks.onUpdate = hooks.call{
@@ -400,16 +455,23 @@ if plpath.isfile(lastStatePath) and not config.nosave then
     -- Support modifying the maxepoch setting during resume
     engine.hooks.onResume = function(state)
         state.maxepoch = config.maxepoch
+        state.optconfig.learningRate = config.lr 
+        print("current learning rate:", state.optconfig.learningRate)
+        -- Yanyao: newly add start
+        --state.epoch = 1
+        -- Yanyao: newly add end
     end
 
     engine:resume{
         path = lastStatePath,
         iterator = corpus.train,
+        config = config,
     }
 else
     engine:train{
         iterator = corpus.train,
         optconfig = optalgConfig,
+        config = config,
         maxepoch = config.maxepoch,
         clip = config.clip,
     }
@@ -417,6 +479,8 @@ end
 
 local function runFinalEval()
     -- Evaluate the best network on the supplied test set
+    local modelname = 'fairseq.models.'.. config.model ..'_model'
+    require(modelname)
     local path = plpath.join(config.savedir, 'model_best.th7')
     local best_model = torch.load(path)
 
@@ -424,7 +488,7 @@ local function runFinalEval()
     genconfig.minlen = 1
     genconfig.maxlen = genconfig._maxlen
 
-    for _, beam in ipairs({1, 5, 10, 20}) do
+    for _, beam in ipairs({1, 5, 10}) do
         genconfig.beam = beam
         if not config.notext then
             genconfig.outfile = plpath.join(

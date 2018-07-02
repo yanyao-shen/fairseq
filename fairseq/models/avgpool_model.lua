@@ -347,6 +347,7 @@ AvgpoolModel.generationEncode = argcheck{
     {name='bsz', type='number'},
     call = function(self, config, bsz)
         local m = self:network()
+        --local m = self.module:network()
         local encoder = mutils.findAnnotatedNode(m, 'encoder')
         local beam = config.beam
         local bbsz = beam * bsz
@@ -358,8 +359,16 @@ AvgpoolModel.generationEncode = argcheck{
             -- so duplicate the encoder output accordingly.
             local index = torch.range(1, bsz + 1, 1 / beam)
             index = index:narrow(1, 1, bbsz):floor():long()
-            for i = 1, #encoderOut do
-                encoderOut[i] = encoderOut[i]:index(1, index)
+            if not config.denseatt then
+                for i = 1, #encoderOut do
+                    encoderOut[i] = encoderOut[i]:index(1, index)
+                end
+            else
+                for i = 1, #encoderOut do
+                    for j = 1, #encoderOut[i] do
+                        encoderOut[i][j] = encoderOut[i][j]:index(1, index)
+                    end
+                end
             end
             state.encoderOut = encoderOut
         end

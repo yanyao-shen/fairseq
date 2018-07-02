@@ -224,6 +224,9 @@ Sentence generation. See search.lua for a description of search functions.
     {name='sample', type='table'},
     {name='search', type='table'},
     call = function(self, config, sample, search)
+        if not config.istrain then
+            print('entering Model.generate function')
+        end
         local dict = config.dict
         local minlen = config.minlen
         local maxlen = config.maxlen
@@ -300,6 +303,7 @@ Sentence generation. See search.lua for a description of search functions.
             times[k] = v:time()
         end
         table.insert(results, times)
+        --print(results)
         return table.unpack(results)
     end
 }

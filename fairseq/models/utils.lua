@@ -103,12 +103,27 @@ function mutils.findAnnotatedNode(module, name)
     return found
 end
 
+function mutils.findNode(module, name)
+    local found = nil
+    mutils.forAllModules(module, function(m)
+        if not torch.isTypeOf(m, 'nn.Module') then
+            return 
+        end
+        if m.name and m.name == name then
+            found = m
+        end
+    end)
+
+    return found
+end
+
 function mutils.loadLegacyModel(path, typename)
     -- XXX This makes a couple of assumptions on the model internals
     local M = require(string.format(
         'fairseq.models.%s_model', typename))
     local model = torch.factory(M.__typename)()
-    model.module = torch.load(path)
+    --model.module = torch.load(path)
+    local model = torch.load(path)
     return model
 end
 

@@ -21,3 +21,7 @@ require 'fairseq.modules.LinearizedConvolution'
 require 'fairseq.modules.SeqMultiply'
 require 'fairseq.modules.TrainTestLayer'
 require 'fairseq.modules.ZipAlong'
+require 'fairseq.modules.BDiagonal'
+require 'fairseq.modules.BDiagonalSimple'
+-- this is only for reference
+--require 'fairseq.modules.DenseConnectLayer'

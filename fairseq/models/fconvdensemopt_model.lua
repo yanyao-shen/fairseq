@@ -43,15 +43,77 @@ local function attentionLayers(nlayer, attnlayers)
     end
     return attnlayersTab
 end
+local function calHidNum(config)
+    local encIn, encOut, decIn, decOut = {}, {}, {}, {}
+    encIn[1] = config.nhids[1]
+    if config.optenc == 0 or 1 <= config.keeplayers_enc then
+        encOut[1] = config.nhids[1]
+    elseif config.optenc == 1 then
+        encOut[1] = config.nhids[1] + config.nhid_accs[1]
+    end
+    decIn[1] = config.nlmhids[1]
+    if config.opt == 0 or 1 <= config.keeplayers_dec then
+        decOut[1] = config.nhids[1]
+    elseif config.opt == 1 then
+        decOut[1] = config.nhids[1] + 2* config.nhid_accs_dec[1]
+    elseif config.opt == 2 then
+        decOut[1] = config.nhids[1] + config.nhid_accs_dec[1]
+    elseif config.opt == 3 or config.opt == 4 then
+        decOut[1] = 2*config.nhid_accs_dec[1]
+    else 
+        print("Not Implemented Error")
+    end
 
-local FConvModel, parent = torch.class('FConvModel', 'AvgpoolModel')
+    for i = 2, #config.nhids do
+        encIn[i] = encOut[i-1]
+        if config.optenc == 0 or i <= config.keeplayers_enc then
+            encOut[i] = config.nhids[i]
+        elseif config.optenc == 1 then
+            if (i-config.keeplayers_enc) % config.blocklength == 0 then
+                encOut[i] = config.nhids[i]
+            else
+                encOut[i] = encIn[i] + config.nhid_accs[i]
+            end
+        else
+            print("Not Implemented Error")
+        end
+    end
+    for i = 2, #config.nlmhids do
+        decIn[i] = decOut[i-1]
+        if config.opt == 0 or i <= config.keeplayers_dec then
+            decOut[i] = config.nlmhids[i]
+        elseif config.opt == 1 or config.opt == 2 then
+            if (i-config.keeplayers_dec) % config.blocklength == 0 then
+                decOut[i] = config.nlmhids[i]
+            else
+                decOut[i] = decIn[i] + (3 - config.opt) * config.nhid_accs_dec[i]
+            end
+        elseif config.opt == 3 or config.opt == 4 then
+            if (i-config.keeplayers_dec) % config.blocklength == 0 then
+                decOut[i] = config.nlmhids[i]
+            else
+                decOut[i] = decIn[i] + 2 * config.nhid_accs_dec[i]
+            end
+        else
+            print("Not Implemented Error")
+        end
+    end
+    res = {}
+    res['encIn'] = encIn
+    res['encOut'] = encOut
+    res['decIn'] = decIn
+    res['decOut'] = decOut
+    return res
+end
+local FConvDenseMoptModel, parent = torch.class('FConvDenseMoptModel', 'AvgpoolModel')
 
-FConvModel.__init = argcheck{
+FConvDenseMoptModel.__init = argcheck{
     {name='self', type='Model'},
     {name='config', type='table', opt=true},
     call = function(self, config)
         parent.__init(self, config)
-
+        config.numhid = calHidNum(config)
+        print(config.numhid)
         -- Store maximum context accessible by the decoder so that generation
         -- can skip unnecessary computations.
         local decoder = mutils.findAnnotatedNode(self:network(), 'decoder')
@@ -67,18 +129,18 @@ FConvModel.__init = argcheck{
     end
 }
 
-local ConvBlockTrainTestLayer, _ = torch.class('nn.ConvBlockTrainTestLayer',
+local ConvDenseMoptBlockTrainTestLayer, _ = torch.class('nn.ConvDenseMoptBlockTrainTestLayer',
     'nn.TrainTestLayer')
 
-function ConvBlockTrainTestLayer:__init(trainModule, evalModule)
+function ConvDenseMoptBlockTrainTestLayer:__init(trainModule, evalModule)
     nn.Container.__init(self)
     self.modules[1] = trainModule
     self.modules[2] = evalModule
     self.train = true
 end
 
-ConvBlockTrainTestLayer.onTrain = function() end
-ConvBlockTrainTestLayer.onEvaluate = function(trnMod, testMod)
+ConvDenseMoptBlockTrainTestLayer.onTrain = function() end
+ConvDenseMoptBlockTrainTestLayer.onEvaluate = function(trnMod, testMod)
     local conv = trnMod:get(2):get(1)
     testMod:setParameters(
         conv.weight:transpose(3, 1):transpose(2, 3),
@@ -86,7 +148,11 @@ ConvBlockTrainTestLayer.onEvaluate = function(trnMod, testMod)
     )
 end
 
-FConvModel.makeDecoderFast = argcheck{
+
+
+
+
+FConvDenseMoptModel.makeDecoderFast = argcheck{
     {name='self', type='Model'},
     call = function(self)
         if self.convStates then return end
@@ -94,7 +160,7 @@ FConvModel.makeDecoderFast = argcheck{
         -- edit the conv blocks to use LinearizedConvolution at test time
         local decoder = mutils.findAnnotatedNode(self:network(), 'decoder')
         for i = 1, math.huge do
-            local block = mutils.findAnnotatedNode(decoder, 'convBlock_' .. i)
+            local block = mutils.findAnnotatedNode(decoder, 'ConvDenseMoptBlock_' .. i)
             if not block then break end
 
             -- typecheck
@@ -121,7 +187,7 @@ FConvModel.makeDecoderFast = argcheck{
             -- new layers match original type
             trnMod:type(conv:type())
             testMod:type(conv:type())
-            local trnTest = nn.ConvBlockTrainTestLayer(trnMod, testMod)
+            local trnTest = nn.ConvDenseMoptBlockTrainTestLayer(trnMod, testMod)
             trnTest:type(conv:type())
 
             -- replace first four layer by train/test layer
@@ -140,7 +206,7 @@ FConvModel.makeDecoderFast = argcheck{
     end
 }
 
-FConvModel.setBeamSize = argcheck{
+FConvDenseMoptModel.setBeamSize = argcheck{
     {name='self', type='Model'},
     {name='beam', type='number'},
     call = function(self, beam)
@@ -155,8 +221,8 @@ FConvModel.setBeamSize = argcheck{
     end
 }
 
-FConvModel.makeLookupTable = argcheck{
-    {name='self', type='FConvModel'},
+FConvDenseMoptModel.makeLookupTable = argcheck{
+    {name='self', type='FConvDenseMoptModel'},
     {name='config', type='table'},
     {name='nindex', type='number'},
     {name='noutput', type='number'},
@@ -168,8 +234,8 @@ FConvModel.makeLookupTable = argcheck{
     end
 }
 
-FConvModel.makeEmbedding = argcheck{
-    {name='self', type='FConvModel'},
+FConvDenseMoptModel.makeEmbedding = argcheck{
+    {name='self', type='FConvDenseMoptModel'},
     {name='config', type='table'},
     {name='dict', type='Dictionary'},
     {name='dropout', type='number', opt=true},
@@ -178,28 +244,37 @@ FConvModel.makeEmbedding = argcheck{
         local embedTokens = self:makeModuleName(
             self:makeLookupTable(config, dict:size(), config.ninembed, dict:getPadIndex()),
             'WordEmbed')
+        
         local embedPositions = self:makeModuleName(
             self:makeLookupTable(config, maxPosition, config.ninembed, dict:getPadIndex()),
             'PosEmbed')
 
         -- Expected input: {tokens, positions}
+
         local embed = nn.Sequential()
-        embed:add(nn.ParallelTable()
-            :add(nn.Sequential()
-                :add(embedTokens)
-                :add(nn.Bottle(self:makeLinear(config.ninembed, config.nembed, config.dropout_src))) )
-            :add(nn.Sequential()
-                :add(embedPositions)
-                :add(nn.Bottle(self:makeLinear(config.ninembed, config.nembed, config.dropout_src))) )
-        )
+        if config.ninembed ~= config.nembed then
+            embed:add(nn.ParallelTable()
+                :add(nn.Sequential()
+                    :add(embedTokens)
+                    :add(nn.Bottle(self:makeLinear(config.ninembed, config.nembed, config.dropout_src))) )
+                :add(nn.Sequential()
+                    :add(embedPositions)
+                    :add(nn.Bottle(self:makeLinear(config.ninembed, config.nembed, config.dropout_src))) )
+            )
+        else
+            embed:add(nn.ParallelTable()
+            :add(embedTokens)
+            :add(embedPositions)
+            )
+        end
         embed:add(nn.CAddTable())
         embed:add(self:makeDropout(dropout))
         return embed
     end
 }
 
-FConvModel.makeTemporalConv = argcheck{
-    {name='self', type='FConvModel'},
+FConvDenseMoptModel.makeTemporalConv = argcheck{
+    {name='self', type='FConvDenseMoptModel'},
     {name='cudnnconv', type='boolean'},
     {name='ninput', type='number'},
     {name='noutput', type='number'},
@@ -222,8 +297,8 @@ FConvModel.makeTemporalConv = argcheck{
     end
 }
 
-FConvModel.makeBottleneckConv = argcheck{
-    {name='self', type='FConvModel'},
+FConvDenseMoptModel.makeBottleneckConv = argcheck{
+    {name='self', type='FConvDenseMoptModel'},
     {name='cudnnconv', type='boolean'},
     {name='ninput', type='number'},
     {name='noutput', type='number'},
@@ -246,8 +321,8 @@ FConvModel.makeBottleneckConv = argcheck{
     end
 }
 
-FConvModel.makeTranspose = argcheck{
-    {name='self', type='FConvModel'},
+FConvDenseMoptModel.makeTranspose = argcheck{
+    {name='self', type='FConvDenseMoptModel'},
     {name='cudnnconv', type='boolean'},
     call = function(self, cudnnconv)
         if cudnnconv then
@@ -258,8 +333,8 @@ FConvModel.makeTranspose = argcheck{
     end
 }
 
-FConvModel.makeEncoderConvBlock = argcheck{
-    {name='self', type='FConvModel'},
+FConvDenseMoptModel.makeEncoderConvBlock = argcheck{
+    {name='self', type='FConvDenseMoptModel'},
     {name='cudnnconv', type='boolean'},
     {name='ninput', type='number'},
     {name='noutput', type='number'},
@@ -284,8 +359,8 @@ FConvModel.makeEncoderConvBlock = argcheck{
     end
 }
 
-FConvModel.makeDecoderConvBlock = argcheck{
-    {name='self', type='FConvModel'},
+FConvDenseMoptModel.makeDecoderConvBlock = argcheck{
+    {name='self', type='FConvDenseMoptModel'},
     {name='cudnnconv', type='boolean'},
     {name='ninput', type='number'},
     {name='noutput', type='number'},
@@ -314,8 +389,8 @@ FConvModel.makeDecoderConvBlock = argcheck{
     end
 }
 
-FConvModel.makeLinear = argcheck{
-    {name='self', type='FConvModel'},
+FConvDenseMoptModel.makeLinear = argcheck{
+    {name='self', type='FConvDenseMoptModel'},
     {name='ninput', type='number'},
     {name='noutput', type='number'},
     {name='doin', type='number', default=0},
@@ -327,8 +402,8 @@ FConvModel.makeLinear = argcheck{
     end
 }
 
-FConvModel.makeDropout = argcheck{
-    {name='self', type='FConvModel'},
+FConvDenseMoptModel.makeDropout = argcheck{
+    {name='self', type='FConvDenseMoptModel'},
     {name='p', type='number', opt=true},
     call = function(self, p)
         if not p or p == 0 then
@@ -338,62 +413,116 @@ FConvModel.makeDropout = argcheck{
     end
 }
 
-FConvModel.makeModuleName = argcheck{
-    {name='self', type='FConvModel'},
+FConvDenseMoptModel.makeModuleName = argcheck{
+    {name='self', type='FConvDenseMoptModel'},
     {name='module', type='nn.Module'},
     {name='name', type='string'},
     call = function(self, module, name)
         module.name = name
-        return module
+        return module 
     end
 }
 
-FConvModel.makeEncoderStack = argcheck{
-    {name='self', type='FConvModel'},
+FConvDenseMoptModel.makeEncoderStack = argcheck{
+    {name='self', type='FConvDenseMoptModel'},
     {name='config', type='table'},
-    {name='nhids', type='table'},
-    call = function(self, config, nhids)
-        if #nhids == 0 then
+    call = function(self, config)
+        if #config.nhids == 0 then
             return nn.Identity()
         end
 
         local stack = nn.Sequential()
         stack:add(self:makeTranspose(config.cudnnconv))
-        for i = 1, #nhids do
-            local nhidin = nhids[i - 1] or nhids[i]
-            local nhidout = nhids[i]
+        config.numhid = calHidNum(config)
+        --local nhid_acc = 256
+        for i = 1, #config.nhids do
+            local nhidin = config.nhids[i - 1] or config.nhids[i]
+            local nhidout = config.nhids[i]
+
+            local nhidin_real = config.numhid.encIn[i]
+            local nhidout_real = config.numhid.encOut[i]
+
+            --[[
+            if config.optenc == 0 then
+                nhidin_real = nhidin
+                nhidout_real = nhidout
+            elseif config.optenc == 1 then
+                nhidin_real = nhidin + ((i-1)%config.blocklength) * config.nhid_acc
+                nhidout_real = nhidout + ((i-1)%config.blocklength+1) * config.nhid_acc
+            end
+            --]]
+
+
             local inpmap = nn.Identity()
-            if nhidin ~= nhidout then
+
+            --
+            if (config.optenc == 0 and nhidin ~= nhidout)  then
+                
                 inpmap = self:makeModuleName(
                     nn.Bottle(
                         self:makeLinear(nhidin, nhidout, config.dropout_hid)),
                     'encoderConv_inpmap_' .. i)
+            
             end
+            if  (i-config.keeplayers_enc) % config.blocklength == 0  then
+                inpmap = self:makeModuleName(
+                    nn.Bottle(
+                        self:makeLinear(nhidin_real, nhidout, config.dropout_hid)),
+                    'encoderConv_inpmap_' .. i)
+            
+            end
+            --]]
+
+            local convout 
+            if config.optenc == 0 or (i-config.keeplayers_enc) % config.blocklength == 0  then
+                convout = nhidout_real
+            elseif config.optenc == 1 then
+                convout = config.nhid_accs[i]
+            end
+
             -- Residual connections
-            stack:add(nn.ConcatTable()
-                :add(nn.Sequential()
-                    :add(self:makeDropout(config.dropout_hid))
-                    :add(self:makeModuleName(
-                            self:makeEncoderConvBlock(config.cudnnconv,
-                            nhidin, nhidout, config.bfactor, config.kwidths[i],
-                            config.dropout_hid),
-                            'encoderConv_' .. i)))
-                :add(inpmap))
-            stack:add(nn.CAddTableMulConstant(math.sqrt(0.5)))
+            if config.optenc == 0 or (i-config.keeplayers_enc) % config.blocklength == 0 then
+                stack:add(nn.ConcatTable()
+                    :add(nn.Sequential()
+                        :add(self:makeDropout(config.dropout_hid))
+                        :add(self:makeModuleName(
+                                self:makeEncoderConvBlock(config.cudnnconv,
+                                nhidin_real, convout, config.bfactor, config.kwidths[i],
+                                config.dropout_hid),
+                                'encoderConv_' .. i)))
+                    :add(inpmap))
+                stack:add(nn.CAddTableMulConstant(math.sqrt(0.5)))
+            elseif config.optenc == 1 then
+                stack:add(nn.Concat(3)
+                    :add(nn.Sequential()
+                        :add(self:makeDropout(config.dropout_hid))
+                        :add(self:makeModuleName(
+                                self:makeEncoderConvBlock(config.cudnnconv,
+                                nhidin_real, convout, config.bfactor, config.kwidths[i],
+                                config.dropout_hid),
+                                'encoderConv_' .. i)))
+                    :add(inpmap))
+            end
         end
         stack:add(self:makeTranspose(config.cudnnconv))
         return stack
     end
 }
 
-FConvModel.makeEncoder = argcheck{
-    {name='self', type='FConvModel'},
+FConvDenseMoptModel.makeEncoder = argcheck{
+    {name='self', type='FConvDenseMoptModel'},
     {name='config', type='table'},
     call = function(self, config)
         local sourceIn = nn.Identity()()
         local tokens, positions = sourceIn:split(2)
-        local embed = self:makeEmbedding(config, config.srcdict,
-            config.dropout_src)({tokens, positions}):annotate({name = 'encoderEmbed'})
+
+        local embedmodel = self:makeEmbedding(config, config.srcdict, config.dropout_src)
+        --self.embed = embedmodel
+        local embed = embedmodel({tokens, positions}):annotate({name = 'encoderEmbed'})
+        --local embed = self:makeEmbedding(config, config.srcdict,
+        --    config.dropout_src)({tokens, positions}):annotate({name = 'encoderEmbed'})
+        
+        config.numhid = calHidNum(config)
 
         local cnn
         if #config.nhids > 0 then
@@ -404,10 +533,20 @@ FConvModel.makeEncoder = argcheck{
                     config.dropout_src)),
                 'encoderEmbedToCNN'))
             cnn:add(nn.Contiguous())
-            cnn:add(self:makeEncoderStack(config, config.nhids))
+            cnn:add(self:makeEncoderStack(config))
+            
+            local nhidout_real = config.numhid.encOut[#config.nhids]
+            --[[
+            if config.optenc == 0 or #config.nhids%config.blocklength == 0 then
+                nhidout_real = config.nhids[#config.nhids]
+            elseif config.optenc == 1 then
+                nhidout_real = ((#config.nhids-1)%config.blocklength+1) * config.nhid_acc + config.nhids[#config.nhids]
+            end
+            --]]
+            
             cnn:add(self:makeModuleName(
                 nn.Bottle(
-                    self:makeLinear(config.nhids[#config.nhids], config.nembed)),
+                    self:makeLinear(nhidout_real, config.nembed)),
                 'encoderCNNToEmbed'))
         else
             cnn = nn.Identity()
@@ -427,22 +566,67 @@ FConvModel.makeEncoder = argcheck{
     end
 }
 
-FConvModel.makeAttention = argcheck{
-    {name='self', type='FConvModel'},
+FConvDenseMoptModel.makeEncoderDense = argcheck{
+    {name='self', type='FConvDenseMoptModel'},
+    {name='config', type='table'},
+    call = function(self, config)
+        local sourceIn = nn.Identity()()
+        local tokens, positions = sourceIn:split(2)
+
+        local embedmodel = self:makeEmbedding(config, config.srcdict, config.dropout_src)
+        --self.embed = embedmodel
+        local embed = embedmodel({tokens, positions}):annotate({name = 'encoderEmbed'})
+        --local embed = self:makeEmbedding(config, config.srcdict,
+        --    config.dropout_src)({tokens, positions}):annotate({name = 'encoderEmbed'})
+        local cnn
+        cnn = nn.Sequential()
+        cnn:add(self:makeModuleName(
+            nn.Bottle(
+                self:makeLinear(config.nembed, config.nhids[1],
+                config.dropout_src)),
+            'encoderEmbedToCNN'))
+        cnn:add(nn.Contiguous())
+        cnn:add(self:makeEncoderStack(config))
+        
+        local encoder_out = cnn(embed):annotate({name = 'encoderCNN'})
+
+        local k = (#config.nhids - config.keeplayers_enc) % config.blocklength
+        local dimacc = 1
+        local outputAC_table = {}
+        for i = 1, k do
+            --narrow, dimension is config.nhid_accs except the first one.
+            local dim = config.nhid_accs[#config.nhid_accs + 1 - i]
+            local encoder_out_i = nn.Narrow(3, dimacc, dim)(encoder_out)
+            --add makelinear
+            encoder_out_i = nn.Bottle(self:makeLinear(dim, config.nembed))(encoder_out_i)
+            --add to outputAC_table
+            table.insert(outputAC_table, nn.Identity()({encoder_out_i, nn.CAddTableMulConstant(math.sqrt(0.5))({encoder_out_i, embed})}))
+            dimacc = dimacc + dim 
+        end
+        local dim = config.numhid.encIn[#config.nhid_accs_dec + 1 - k]
+        local encoder_out_i = nn.Narrow(3, dimacc, dim)(encoder_out)
+        encoder_out_i = nn.Bottle(self:makeLinear(dim, config.nembed))(encoder_out_i)
+        table.insert(outputAC_table, nn.Identity()({encoder_out_i, nn.CAddTableMulConstant(math.sqrt(0.5))({encoder_out_i, embed})}))
+        config.numtab = #outputAC_table
+        return nn.gModule({sourceIn}, outputAC_table)
+    end
+}
+
+FConvDenseMoptModel.makeAttention = argcheck{
+    {name='self', type='FConvDenseMoptModel'},
     {name='config', type='table'},
     {name='index', type='number'},
-    call = function(self, config, index)
+    {name='input', type='number'},
+    call = function(self, config, index, input)
         local attnIn = nn.Identity()()
         local targetEm, decoderState, aencoderOut = attnIn:split(3)
         local encoderOutA, encoderOutC = aencoderOut:split(2)
-
         local decProj = nn.Bottle(
-            self:makeLinear(config.nlmhids[index], config.nembed))(
+            self:makeLinear(input, config.nembed))(
                 decoderState
         ):annotate{name = 'decProj_' .. index}
         local decoderRep = nn.CAddTableMulConstant(
             math.sqrt(0.5))({decProj, targetEm})
-
         -- Compute attention scores using a simple dot product between encoder
         -- output and decoder states. We can compute all attention scores at
         -- once for this model.
@@ -466,13 +650,64 @@ FConvModel.makeAttention = argcheck{
                 encoderOutC
             })
         )
-
         return nn.gModule({attnIn}, {attnOut})
     end
 }
 
-FConvModel.makeTargetMappingWithSelection = argcheck{
-    {name='self', type='FConvModel'},
+FConvDenseMoptModel.makeAttentionDense = argcheck{
+    {name='self', type='FConvDenseMoptModel'},
+    {name='config', type='table'},
+    {name='index', type='number'},
+    {name='input', type='number'},
+    call = function(self, config, index, input)
+        local attnIn = nn.Identity()()
+        local targetEm, decoderState, aencoderOut = attnIn:split(3)
+        --local encoderOutA, encoderOutC = aencoderOut:split(2)
+        local decProj = nn.Bottle(
+            self:makeLinear(input, config.nembed))(
+                decoderState
+        ):annotate{name = 'decProj_' .. index}
+        local decoderRep = nn.CAddTableMulConstant(
+            math.sqrt(0.5))({decProj, targetEm})
+        -- Compute attention scores using a simple dot product between encoder
+        -- output and decoder states. We can compute all attention scores at
+        -- once for this model.
+        local attnOut_table = {}
+        for i=1, config.numtab do
+            local aencoderOut_ = nn.SelectTable(i)(aencoderOut)
+            local encoderOutA = nn.SelectTable(1)(aencoderOut_)
+            local encoderOutC = nn.SelectTable(2)(aencoderOut_)
+
+
+            local scores = nn.Bottle(nn.SoftMax())(
+                nn.BeamableMM(false, true)({
+                    decoderRep,
+                    encoderOutA,
+                })
+            ):annotate{name = 'attentionScores_' .. index}
+
+            -- Apply attention scores to encoder output and scale output in order to
+            -- reduce variance shift. S * sqrt(1/S) is the correct factor if
+            -- attention scores sum to one and are distributed uniformly for a
+            -- sequence of length S.
+            local attnOut = nn.Squeeze(2, 2)(
+                nn.SeqMultiply()({
+                    nn.BeamableMM()({
+                        scores,
+                        encoderOutC,
+                    }),
+                    encoderOutC
+                })
+            )
+            table.insert(attnOut_table, attnOut)
+        end
+        local attnOut_final = nn.CAddTableMulConstant(math.sqrt(1.0/#attnOut_table))(attnOut_table) 
+        return nn.gModule({attnIn}, {attnOut_final})
+    end
+}
+
+FConvDenseMoptModel.makeTargetMappingWithSelection = argcheck{
+    {name='self', type='FConvDenseMoptModel'},
     {name='config', type='table'},
     call = function(self, config)
         local lut = self:makeLookupTable(config, config.dict:size(),
@@ -487,8 +722,8 @@ FConvModel.makeTargetMappingWithSelection = argcheck{
     end
 }
 
-FConvModel.makeDecoder = argcheck{
-    {name='self', type='FConvModel'},
+FConvDenseMoptModel.makeDecoder = argcheck{
+    {name='self', type='FConvDenseMoptModel'},
     {name='config', type='table'},
     call = function(self, config)
         local decoderLM = self:makeDecoderLM(config)
@@ -507,14 +742,38 @@ FConvModel.makeDecoder = argcheck{
         local lmOut = decoderLM({nn.Identity()({targetTokIn, targetPosIn}),
             encoderOut}):annotate({name = 'convlm'})
 
+        -- several options, 
+        -- opt 0: do not use dense
+        -- use dense opt 1: concat lmout, lmin, att
+        -- use dense opt 2: concat lmin, lmout+att --current
+        -- use dense opt 3: concat lmin+lmout, att
+        -- use dense opt 4: concat lmin+att, lmout
+        config.numhid = calHidNum(config)
+        local nhidout_real_final = config.numhid.decOut[#config.nlmhids]
+        --[[
+        if config.opt == 0 or #config.nlmhids%config.blocklength == 0 then
+            nhidout_real_final = config.nlmhids[#config.nlmhids]
+        elseif config.opt == 1 then
+            nhidout_real_final = config.nlmhids[#config.nlmhids] + 2 * ((#config.nlmhids-1)%config.blocklength+1) * config.nhid_acc_dec
+        elseif config.opt == 2 then 
+            nhidout_real_final = config.nlmhids[#config.nlmhids] + ((#config.nlmhids-1)%config.blocklength+1) * config.nhid_acc_dec
+        elseif config.opt == 3 then
+            nhidout_real_final = 2 * config.nhid_acc_dec
+        elseif config.opt == 4 then
+            nhidout_real_final = 2 * config.nhid_acc_dec
+        end
+        --]]
+
         local outmodule = nn.Sequential()
-            :add(nn.View(-1, config.nlmhids[#config.nlmhids]))
+            :add(nn.View(-1, nhidout_real_final ))
             :add(self:makeModuleName(
-                    self:makeLinear(config.nlmhids[#config.nlmhids], config.noutembed),
+                    self:makeLinear(nhidout_real_final, config.noutembed),
                     'decoderToOutEmbed'))
             :add(self:makeDropout(config.dropout_out))
-        local outmodIn
+        
 
+        --
+        local outmodIn
         if targetVocab then
             local map = self:makeTargetMappingWithSelection(config)
             outmodule = nn.Sequential()
@@ -536,72 +795,180 @@ FConvModel.makeDecoder = argcheck{
 }
 
 
-FConvModel.makeDecoderLM = argcheck{
-    {name='self', type='FConvModel'},
+FConvDenseMoptModel.makeDecoderLM = argcheck{
+    {name='self', type='FConvDenseMoptModel'},
     {name='config', type='table'},
     call = function(self, config)
         local input = nn.Identity()()
         local targetIn, encoderOut = input:split(2)
         local tokens, positions = targetIn:split(2)
 
-        local targetEmbed = self:makeEmbedding(config, config.dict,
-            config.dropout_tgt)({tokens, positions}):annotate({name = 'decoderEmbed'})
+        local targetEmbedmodel = self:makeEmbedding(config, config.dict, config.dropout_tgt)
+        --need to use the same dictionary before sharing.
+        --targetEmbedmodel:share(self.embed, 'weight', 'bias')
+
+        --local targetEmbed = self:makeEmbedding(config, config.dict,
+        --    config.dropout_tgt)({tokens, positions}):annotate({name = 'decoderEmbed'})
+        local targetEmbed = targetEmbedmodel({tokens, positions}):annotate({name = 'decoderEmbed'})
 
         local attnlayers = attentionLayers(#config.nlmhids, config.attnlayers)
         assert(#config.nlmhids > 0)
         local lmOut = nn.Bottle(self:makeLinear(config.nembed, config.nlmhids[1],
             config.dropout_tgt))(targetEmbed):annotate({name = 'decoderEmbedToCNN'})
+
+        config.numhid = calHidNum(config)
         for i = 1, #config.nlmhids do
             local nhidin = config.nlmhids[i - 1] or config.nlmhids[i]
             local nhidout = config.nlmhids[i]
+            --local inpmap = nn.Identity()
+
+            local nhidin_real = config.numhid.decIn[i]
+            local nhidout_real = config.numhid.decOut[i]
+            --[[
+            if config.opt == 0 then
+                nhidin_real = nhidin
+                nhidout_real = nhidout 
+            elseif config.opt == 1 then
+                nhidin_real = nhidin + 2 * ((i-1)%config.blocklength) * config.nhid_acc_dec
+                nhidout_real = nhidout + 2 * ((i-1)%config.blocklength+1) * config.nhid_acc_dec
+            elseif config.opt == 2 then
+                nhidin_real = nhidin + ((i-1)%config.blocklength) * config.nhid_acc_dec
+                nhidout_real = nhidout + ((i-1)%config.blocklength+1) * config.nhid_acc_dec
+            elseif config.opt == 3 or config.opt == 4 then
+                if i%config.blocklength == 1 then
+                    nhidin_real = nhidin
+                else
+                    nhidin_real = 2 * config.nhid_acc_dec
+                end
+                nhidout_real = 2 * config.nhid_acc_dec
+            end
+            --]]
+            
+            --
+            if config.opt == 3 or config.opt == 4 then
+                inpmap = self:makeModuleName(
+                    nn.Bottle(
+                        self:makeLinear(nhidin_real, config.nhid_accs_dec[i], config.dropout_hid)),
+                    'decoderConv_inpmap_' .. i)
+            end
+            --]]
+
+            
+            -- Convolutional layer + GLU
+
+            local convout 
+            if config.opt == 0 or (i-config.keeplayers_dec) % config.blocklength == 0 then 
+                convout = nhidout_real
+            else
+                convout = config.nhid_accs_dec[i]
+            end
+
             local inpmap = nn.Identity()
-            if nhidin ~= nhidout then
+
+            --
+            if (config.opt == 0 and nhidin ~= nhidout)  then
+
                 inpmap = self:makeModuleName(
                     nn.Bottle(
                         self:makeLinear(nhidin, nhidout, config.dropout_hid)),
                     'decoderConv_inpmap_' .. i)
+
             end
+            if (i-config.keeplayers_dec) % config.blocklength == 0 then
+                inpmap = self:makeModuleName(
+                    nn.Bottle(
+                        self:makeLinear(nhidin_real, nhidout, config.dropout_hid)),
+                    'decoderConv_inpmap_' .. i)
+
+            end
+            --]]
+
             local lmIn = inpmap(lmOut)
-            -- Convolutional layer + GLU
-            lmOut = self:makeDecoderConvBlock(config.cudnnconv,
-                nhidin, nhidout, config.bfactor, config.klmwidths[i],
+
+            local lmConv = self:makeDecoderConvBlock(config.cudnnconv,
+                nhidin_real, convout, config.bfactor, config.klmwidths[i],
                 config.dropout_hid)(
                     self:makeDropout(config.dropout_hid)(lmOut)
                 ):annotate{name = 'decoderConv_' .. i}
 
+            
+            --local lmAtt = inpmap(lmConv)
             -- Attention pass
-            if attnlayers[i] then
-                lmOut = nn.CAddTableMulConstant(math.sqrt(0.5))({
-                    nn.Bottle(self:makeLinear(config.nembed, nhidout))(
-                        self:makeAttention(config, i)({
+            --if attnlayers[i] then
+            local lmAtt
+            if not config.denseatt then
+                lmAtt = nn.Bottle(self:makeLinear(config.nembed, convout))(
+                        self:makeAttention(config, i, convout)({
                             targetEmbed,
-                            lmOut,
+                            lmConv,
                             encoderOut,
                         }):annotate{
                             name = 'convAttnQuery_' .. i
                         }):annotate{
                             name = 'convAttnOut_' .. i
-                        },
-                    lmOut,
-                })
+                        }
+            else
+                lmAtt = nn.Bottle(self:makeLinear(config.nembed, convout))(
+                        self:makeAttentionDense(config, i, convout)({
+                            targetEmbed,
+                            lmConv,
+                            encoderOut,
+                        }):annotate{
+                            name = 'convAttnQuery_' .. i
+                        }):annotate{
+                            name = 'convAttnOut_' .. i
+                        }
             end
+            --else
+            --    print('no attention!!!')
+            --end
 
+            if config.densebn then
+                --lmIn = 
+                --lmConv = 
+                lmAtt = nn.Bottle(nn.LayerNormalization(convout))(lmAtt)
+            end
+            --
+            if config.opt == 0 or (i-config.keeplayers_dec) % config.blocklength == 0 then
+                lmOut = nn.CAddTableMulConstant(math.sqrt(0.5))({lmIn, 
+                    nn.CAddTableMulConstant(math.sqrt(0.5))({lmAtt, lmConv})})
+            elseif config.opt == 1 then
+                lmOut = nn.JoinTable(3)({lmIn, lmAtt, lmConv})
+            elseif config.opt == 2 then
+                lmOut = nn.JoinTable(3)({lmIn, 
+                    nn.CAddTableMulConstant(math.sqrt(0.5))({lmAtt, lmConv})})
+            elseif config.opt == 3 then
+                lmOut = nn.JoinTable(3)({lmAtt,
+                    nn.CAddTableMulConstant(math.sqrt(0.5))({lmIn, lmConv})})
+            elseif config.opt == 4 then
+                lmOut = nn.JoinTable(3)({lmConv,
+                    nn.CAddTableMulConstant(math.sqrt(0.5))({lmIn, lmAtt})})
+            end
+            --]]
+            
             -- residual connection
-            lmOut = nn.CAddTableMulConstant(math.sqrt(0.5))({lmIn, lmOut})
+            --lmOut = nn.CAddTableMulConstant(math.sqrt(0.5))({lmIn, lmOut})
+            --lmOut = nn.JoinTable(3)({lmOut, lmIn})
         end
 
         return nn.gModule({input}, {lmOut})
     end
 }
 
-FConvModel.make = argcheck{
-    {name='self', type='FConvModel'},
+
+FConvDenseMoptModel.make = argcheck{
+    {name='self', type='FConvDenseMoptModel'},
     {name='config', type='table'},
     call = function(self, config)
         assert(#config.nlmhids == #config.klmwidths)
         assert(#config.nhids == #config.kwidths)
 
-        local encoder = self:makeEncoder(config)
+        local encoder
+        if not config.denseatt then
+            encoder = self:makeEncoder(config)
+        else
+            encoder = self:makeEncoderDense(config)
+        end
         local decoder = self:makeDecoder(config)
 
         -- Wire up encoder and decoder
@@ -616,8 +983,8 @@ FConvModel.make = argcheck{
     end
 }
 
-FConvModel.prepareSample = argcheck{
-    {name='self', type='FConvModel'},
+FConvDenseMoptModel.prepareSample = argcheck{
+    {name='self', type='FConvDenseMoptModel'},
     call = function(self)
         -- Device buffers for samples
         local buffers = {
@@ -651,8 +1018,8 @@ FConvModel.prepareSample = argcheck{
     end
 }
 
-FConvModel.resizeCriterionWeights = argcheck{
-    {name='self', type='FConvModel'},
+FConvDenseMoptModel.resizeCriterionWeights = argcheck{
+    {name='self', type='FConvDenseMoptModel'},
     {name='criterion', type='nn.Criterion'},
     {name='critweights', type='torch.CudaTensor'},
     {name='sample', type='table'},
@@ -669,8 +1036,8 @@ FConvModel.resizeCriterionWeights = argcheck{
     end
 }
 
-FConvModel.generationSetup = argcheck{
-    {name='self', type='FConvModel'},
+FConvDenseMoptModel.generationSetup = argcheck{
+    {name='self', type='FConvDenseMoptModel'},
     {name='config', type='table'},
     {name='bsz', type='number'},
     call = function(self, config, bsz)
@@ -709,8 +1076,8 @@ FConvModel.generationSetup = argcheck{
     end
 }
 
-FConvModel.generationAttention = argcheck{
-    {name='self', type='FConvModel'},
+FConvDenseMoptModel.generationAttention = argcheck{
+    {name='self', type='FConvDenseMoptModel'},
     {name='config', type='table'},
     {name='bsz', type='number'},
     call = function(self, config, bsz)
@@ -744,8 +1111,8 @@ FConvModel.generationAttention = argcheck{
     end
 }
 
-FConvModel.generationDecode = argcheck{
-    {name='self', type='FConvModel'},
+FConvDenseMoptModel.generationDecode = argcheck{
+    {name='self', type='FConvDenseMoptModel'},
     {name='config', type='table'},
     {name='bsz', type='number'},
     call = function(self, config, bsz)
@@ -809,8 +1176,8 @@ FConvModel.generationDecode = argcheck{
     end
 }
 
-FConvModel.generationUpdate = argcheck{
-    {name='self', type='FConvModel'},
+FConvDenseMoptModel.generationUpdate = argcheck{
+    {name='self', type='FConvDenseMoptModel'},
     {name='config', type='table'},
     {name='bsz', type='number'},
     call = function(self, config, bsz)
@@ -828,8 +1195,8 @@ FConvModel.generationUpdate = argcheck{
     end
 }
 
-FConvModel.generationFinalize = argcheck{
-    {name='self', type='FConvModel'},
+FConvDenseMoptModel.generationFinalize = argcheck{
+    {name='self', type='FConvDenseMoptModel'},
     {name='config', type='table'},
     call = function(self, config)
         if config.aligndict then
@@ -846,7 +1213,7 @@ FConvModel.generationFinalize = argcheck{
     end
 }
 
-function FConvModel:float(...)
+function FConvDenseMoptModel:float(...)
     self.module:replace(function(m)
         if torch.isTypeOf(m, 'cudnn.TemporalConvolution') then
             return mutils.moveTemporalConvolutionToCPU(m)
@@ -856,4 +1223,4 @@ function FConvModel:float(...)
     return parent.float(self, ...)
 end
 
-return FConvModel
+return FConvDenseMoptModel

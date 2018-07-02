@@ -64,6 +64,7 @@ EnsembleModel.generate = argcheck{
     {name='sample', type='table'},
     {name='search', type='table'},
     call = function(self, config, sample, search)
+        print('entering EnsembleModel.generate function')
         local dict = config.dict
         local minlen = config.minlen
         local maxlen = config.maxlen

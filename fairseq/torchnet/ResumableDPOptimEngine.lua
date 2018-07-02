@@ -16,11 +16,20 @@ local tnt = require 'torchnet'
 local argcheck = require 'argcheck'
 local utils = require 'fairseq.utils'
 local threads = require 'threads'
+local mutils = require 'fairseq.models.utils'
 
 local cuda = utils.loadCuda()
 
 local ResumableDPOptimEngine =
     torch.class('tnt.ResumableDPOptimEngine', 'tnt.OptimEngine', tnt)
+
+function transfer(src, tgt)
+    sp, sgp = src:parameters()
+    tp, tgp = tgt:parameters()
+    for i = 1, #tp do
+        tp[i]:copy(sp[i])
+    end
+end
 
 ResumableDPOptimEngine.__init = argcheck{
     {name='self', type='tnt.ResumableDPOptimEngine'},
@@ -28,26 +37,43 @@ ResumableDPOptimEngine.__init = argcheck{
     {name='thread_init_fn', type='function'},
     {name='make_model_fn', type='function'},
     {name='make_criterion_fn', type='function'},
+    {name='config', type='table'},
     call = function(self, nshards, thread_init_fn,
-        make_model_fn, make_criterion_fn)
+        make_model_fn, make_criterion_fn, config)
         tnt.Engine.__init(self, {
             'onStart', 'onStartEpoch', 'onSample',
             'onForward', 'onForwardCriterion',
             'onBackward', 'onBackwardCriterion',
             'onEndEpoch', 'onUpdate', 'onEnd',
             'onResume', 'onJumpToEpoch', 'onJumpToSample',
+            'onEmbedding',
         })
+
         self.nshards = nshards
         threads.Threads.serialization('threads.sharedserialize')
         self.pool = threads.Threads(
             nshards,
             thread_init_fn,
             function(id)
+               
                 local cutorch = require 'cutorch'
                 cutorch.setDevice(id)
                 _G.id = id
                 _G.model = make_model_fn(id)
                 _G.params, _G.gradparams = _G.model:network():getParameters()
+
+                if not config.pretrain then
+                    print('start transfer parameters from an old model')
+                    input_model = torch.load(config.pretrainpath .. '/model_best.th7')
+                    input_model.module:clearState()
+
+                    _G.model.module:clearState()
+
+                    p_G, _ = _G.model.module:getParameters()
+                    p_i, _ = input_model.module:getParameters()
+                    p_G:copy(p_i)
+                end
+                
                 _G.criterion, _G.critweights = make_criterion_fn(id)
                 _G.optstate = {}
                 _G.feval = function()
@@ -77,7 +103,6 @@ ResumableDPOptimEngine.model = argcheck{
     {name='self', type='tnt.ResumableDPOptimEngine'},
     call = function(self)
         local model = nil
-        -- All the models are identical, so return just the first one
         self.pool:addjob(1,
             function() return _G.model end,
             function(m) model = m end
@@ -100,7 +125,6 @@ ResumableDPOptimEngine.saveState = argcheck{
             clip = state.clip,
             maxepoch = state.maxepoch,
         }
-        -- Save state of one network only, since they are identical
         self.pool:addjob(1,
             function(path, save)
                 local utils = require 'fairseq.utils'
@@ -121,6 +145,7 @@ ResumableDPOptimEngine.loadState = argcheck{
     {name='self', type='tnt.ResumableDPOptimEngine'},
     {name='path', type='string'},
     call = function(self, path)
+        print('load state...', path)
         local state = torch.load(path)
         for shardid = 1, self.nshards do
             self.pool:addjob(shardid,
@@ -130,14 +155,11 @@ ResumableDPOptimEngine.loadState = argcheck{
                     _G.optstate = {}
                     for k, v in pairs(optstate) do
                         if torch.type(v) == 'torch.CudaTensor' then
-                            -- deep copy for tensors
                             _G.optstate[k] = v.new(v:size()):copy(v)
                         else
                             _G.optstate[k] = v
                         end
                     end
-                    collectgarbage()
-                    collectgarbage()
                 end,
                 function() end,
                 state.params, state.optstate
@@ -147,8 +169,6 @@ ResumableDPOptimEngine.loadState = argcheck{
         state.params = nil
         state.optstate = nil
         collectgarbage()
-        -- TODO: this is to unblock old snapshots, remove once we don't have
-        -- them anymore.
         state.epoch_t = state.epoch_t or 0
         state.rng_state = state.rng_state or torch.getRNGState()
         state.cu_rng_state = state.cu_rng_state or cuda.cutorch.getRNGState()
@@ -162,11 +182,12 @@ ResumableDPOptimEngine.resume = argcheck{
     {name='self', type='tnt.ResumableDPOptimEngine'},
     {name='path', type='string'},
     {name='iterator', type='tnt.DatasetIterator'},
-    call = function(self, path, iterator)
+    {name='config', type='table'},
+    call = function(self, path, iterator, config)
         local state = self:loadState(path)
         state.iterator = iterator
         self.hooks('onResume', state)
-        self:doTrain(state)
+        self:doTrain(state, config)
     end
 }
 
@@ -174,21 +195,22 @@ ResumableDPOptimEngine.train = argcheck{
     {name='self', type='tnt.ResumableDPOptimEngine'},
     {name='iterator', type='tnt.DatasetIterator'},
     {name='optconfig', type='table'},
+    {name='config', type='table'},
     {name='maxepoch', type='number', default=1000},
     {name='clip', type='number', default=10},
-    call = function(self, iterator, optconfig, maxepoch, clip)
+    call = function(self, iterator, optconfig, config, maxepoch, clip)
         local state = {
             iterator = iterator,
             maxepoch = maxepoch,
             clip = clip,
             optconfig = optconfig,
-            epoch = 0, -- epoch done so far
-            t = 0, -- samples seen so far
-            epoch_t = 0, --sample seen in the current epoch
+            epoch = 0, 
+            t = 0, 
+            epoch_t = 0, 
             params = {},
             gradparams = {},
         }
-        self:doTrain(state)
+        self:doTrain(state, config)
     end
 }
 
@@ -235,6 +257,45 @@ ResumableDPOptimEngine.test = argcheck{
     end
 }
 
+ResumableDPOptimEngine.modifyEmbedding = argcheck{
+    {name='self', type='tnt.ResumableDPOptimEngine'},
+    {name='state', type='table'},
+    {name='config', type='table'},
+    call = function(self, state, config)
+    
+    end
+}
+
+ResumableDPOptimEngine.modifyEmbedding2 = argcheck{
+    {name='self', type='tnt.ResumableDPOptimEngine'},
+    {name='state', type='table'},
+    {name='config', type='table'},
+    call = function(self, state, config)
+
+
+    end
+}
+
+ResumableDPOptimEngine.updateFrequency = argcheck{
+    {name='self', type='tnt.ResumableDPOptimEngine'},
+    {name='samples', type='table'},
+    {name='config', type='table'},
+    call = function(self, samples, config)
+        local timer = torch.Timer()
+        
+    end
+}
+
+ResumableDPOptimEngine.accFrequency = argcheck{
+    {name='self', type='tnt.ResumableDPOptimEngine'},
+    {name='samples', type='table'},
+    {name='config', type='table'},
+    call = function(self, samples, config)
+        local timer = torch.Timer()
+        
+    end
+}
+
 ResumableDPOptimEngine.executeAll = argcheck{
     {name='self', type='tnt.ResumableDPOptimEngine'},
     {name='fn', type='function'},
@@ -254,11 +315,7 @@ ResumableDPOptimEngine.saveModel = argcheck{
         self.pool:addjob(1,
             function()
                 _G.model:network():clearState()
-                collectgarbage()
-                collectgarbage()
                 torch.save(modelpath, _G.model)
-                collectgarbage()
-                collectgarbage()
             end
         )
         self.pool:synchronize()
@@ -282,7 +339,8 @@ ResumableDPOptimEngine.evaluate = argcheck{
 ResumableDPOptimEngine.doTrain = argcheck{
     {name='self', type='tnt.ResumableDPOptimEngine'},
     {name='state', type='table'},
-    call = function(self, state)
+    {name='config', type='table'},
+    call = function(self, state, config)
         state.params = {}
         state.gradparams = {}
         for shardid = 1, self.nshards do
@@ -303,9 +361,6 @@ ResumableDPOptimEngine.doTrain = argcheck{
         local calcclipv = function(samples, timeAverage)
             local clipv = 0
             if not timeAverage then
-                -- If not averaging gradients over time steps, clipping is
-                -- specified by sequence. See note re hyper-parameters in
-                -- train.lua.
                 for _, sample in ipairs(samples) do
                     clipv = clipv + sample.bsz
                 end
@@ -315,17 +370,11 @@ ResumableDPOptimEngine.doTrain = argcheck{
             return clipv * state.clip
         end
 
-        -- If state.epoch_t is non-zero, it is assumed that training should be
-        -- resumed. We'll jump over the first state.epoch_t samples without doing any
-        -- processing other than calling the "onJumpToEpoch" and
-        -- "onJumpToSample" hooks. Iterating through the data is potentially
-        -- time-consuming, but it's the simplest way given the fact that we
-        -- don't know much about the tnt.DatasetIterator's setup and underlying
-        -- data here.
         state.jumped = 0
         local jumping = state.jumped < state.t
 
         self.hooks('onStart', state)
+        print('calling onStart function from hook')
         while state.epoch < state.maxepoch do
             self:training()
 
@@ -336,6 +385,7 @@ ResumableDPOptimEngine.doTrain = argcheck{
                 self.hooks('onJumpToEpoch', state)
             end
             local prevn = 1
+            local cntiter = 0
             local clipv = state.clip
             for samples in state.iterator() do
                 jumping = jumping and state.jumped < state.epoch_t
@@ -349,11 +399,9 @@ ResumableDPOptimEngine.doTrain = argcheck{
                         local sample = state.samples[shardid]
                         if sample then
                             state.ntokens = state.ntokens + sample.ntokens
+                            
                             self.pool:addjob(shardid,
                                 function(optconfig, sample, clipv, prevn)
-                                    -- Clip gradients and update parameters.
-                                    -- Note: this is being done for the
-                                    -- previous sample.
                                     if optconfig then
                                         if optconfig.timeAverage then
                                             _G.gradparams:div(prevn)
@@ -377,6 +425,7 @@ ResumableDPOptimEngine.doTrain = argcheck{
                                     crit:forward(net.output, sample.target)
                                     crit:backward(net.output, sample.target)
                                     net:backward(sample.input, crit.gradInput)
+
                                     collectgarbage()
                                     return crit.output
                                 end,
@@ -402,14 +451,11 @@ ResumableDPOptimEngine.doTrain = argcheck{
                 end
             end
 
-            -- End of epoch: perform last optimization step
+            -- End of epoch: perform the last optimization step
             if not jumping then
                 for shardid = 1, self.nshards do
                     self.pool:addjob(shardid,
                         function(optconfig, clipv, prevn)
-                            -- Clip gradients and update parameters.
-                            -- Note: this is being done for the
-                            -- previous sample.
                             if optconfig then
                                 if optconfig.timeAverage then
                                     _G.gradparams:div(prevn)

@@ -50,7 +50,7 @@ function search.greedy(ttype, dict, maxlen)
     local ascores = {}
     local sourcelen = nil
     local f = {}
-
+    print('inside search.greedy function')
     f.init = function(bsz, sample)
         logprobs:resize(bsz):fill(0)
         lengths:resize(bsz):fill(0)
@@ -140,7 +140,7 @@ search.beam = argcheck{
     local finalized = {}
     local sourcelen = nil
     local f = {}
-
+    print('inside search.beam function')
     local swcLen = subwordContSuffix:len()
 
     -- The penalty tensor is added to the log-probs produced by the model.
@@ -379,7 +379,7 @@ search.visualize = argcheck{
     plot.ipv6 = false
     local batchsize, source, remapFn = nil, nil, nil
     local f = {}
-
+    print('inside search.visualize function')
     f.init = function(bsz, sample)
         batchsize = bsz
         source = sample.source:t()
