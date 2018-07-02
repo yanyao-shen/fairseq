@@ -1,5 +1,5 @@
 # Introduction
-This is an implementation of the DenseNMT architecture described in the paper 'Dense Information Flow for Neural Machine Translation':
+This is an implementation of the DenseNMT architecture described in the paper **Dense Information Flow for Neural Machine Translation**:
 ```
 @inproceedings{shen2018dense,
   title={Dense Information Flow for Neural Machine Translation},
@@ -10,7 +10,7 @@ This is an implementation of the DenseNMT architecture described in the paper 'D
   year={2018}
 }
 ```
-It is built based on fairseq, a sequence-to-sequence learning toolkit for [Torch](http://torch.ch/) from Facebook AI Research tailored to Neural Machine Translation (NMT).
+It is built based on fairseq, a sequence-to-sequence learning toolkit for [Torch](http://torch.ch/) from Facebook AI Research tailored to Neural Machine Translation (NMT). To be more specific, the DenseNMT architecture is implemented in the file fairseq/models/fconvdensemopt.lua. 
 
 ![Model](fairseq.gif)
 
