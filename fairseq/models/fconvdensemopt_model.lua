@@ -442,20 +442,8 @@ FConvDenseMoptModel.makeEncoderStack = argcheck{
             local nhidin_real = config.numhid.encIn[i]
             local nhidout_real = config.numhid.encOut[i]
 
-            --[[
-            if config.optenc == 0 then
-                nhidin_real = nhidin
-                nhidout_real = nhidout
-            elseif config.optenc == 1 then
-                nhidin_real = nhidin + ((i-1)%config.blocklength) * config.nhid_acc
-                nhidout_real = nhidout + ((i-1)%config.blocklength+1) * config.nhid_acc
-            end
-            --]]
-
-
             local inpmap = nn.Identity()
 
-            --
             if (config.optenc == 0 and nhidin ~= nhidout)  then
                 
                 inpmap = self:makeModuleName(
@@ -471,7 +459,6 @@ FConvDenseMoptModel.makeEncoderStack = argcheck{
                     'encoderConv_inpmap_' .. i)
             
             end
-            --]]
 
             local convout 
             if config.optenc == 0 or (i-config.keeplayers_enc) % config.blocklength == 0  then
@@ -517,11 +504,8 @@ FConvDenseMoptModel.makeEncoder = argcheck{
         local tokens, positions = sourceIn:split(2)
 
         local embedmodel = self:makeEmbedding(config, config.srcdict, config.dropout_src)
-        --self.embed = embedmodel
         local embed = embedmodel({tokens, positions}):annotate({name = 'encoderEmbed'})
-        --local embed = self:makeEmbedding(config, config.srcdict,
-        --    config.dropout_src)({tokens, positions}):annotate({name = 'encoderEmbed'})
-        
+
         config.numhid = calHidNum(config)
 
         local cnn
@@ -536,13 +520,6 @@ FConvDenseMoptModel.makeEncoder = argcheck{
             cnn:add(self:makeEncoderStack(config))
             
             local nhidout_real = config.numhid.encOut[#config.nhids]
-            --[[
-            if config.optenc == 0 or #config.nhids%config.blocklength == 0 then
-                nhidout_real = config.nhids[#config.nhids]
-            elseif config.optenc == 1 then
-                nhidout_real = ((#config.nhids-1)%config.blocklength+1) * config.nhid_acc + config.nhids[#config.nhids]
-            end
-            --]]
             
             cnn:add(self:makeModuleName(
                 nn.Bottle(
@@ -574,10 +551,7 @@ FConvDenseMoptModel.makeEncoderDense = argcheck{
         local tokens, positions = sourceIn:split(2)
 
         local embedmodel = self:makeEmbedding(config, config.srcdict, config.dropout_src)
-        --self.embed = embedmodel
         local embed = embedmodel({tokens, positions}):annotate({name = 'encoderEmbed'})
-        --local embed = self:makeEmbedding(config, config.srcdict,
-        --    config.dropout_src)({tokens, positions}):annotate({name = 'encoderEmbed'})
         local cnn
         cnn = nn.Sequential()
         cnn:add(self:makeModuleName(
@@ -750,19 +724,6 @@ FConvDenseMoptModel.makeDecoder = argcheck{
         -- use dense opt 4: concat lmin+att, lmout
         config.numhid = calHidNum(config)
         local nhidout_real_final = config.numhid.decOut[#config.nlmhids]
-        --[[
-        if config.opt == 0 or #config.nlmhids%config.blocklength == 0 then
-            nhidout_real_final = config.nlmhids[#config.nlmhids]
-        elseif config.opt == 1 then
-            nhidout_real_final = config.nlmhids[#config.nlmhids] + 2 * ((#config.nlmhids-1)%config.blocklength+1) * config.nhid_acc_dec
-        elseif config.opt == 2 then 
-            nhidout_real_final = config.nlmhids[#config.nlmhids] + ((#config.nlmhids-1)%config.blocklength+1) * config.nhid_acc_dec
-        elseif config.opt == 3 then
-            nhidout_real_final = 2 * config.nhid_acc_dec
-        elseif config.opt == 4 then
-            nhidout_real_final = 2 * config.nhid_acc_dec
-        end
-        --]]
 
         local outmodule = nn.Sequential()
             :add(nn.View(-1, nhidout_real_final ))
@@ -770,9 +731,7 @@ FConvDenseMoptModel.makeDecoder = argcheck{
                     self:makeLinear(nhidout_real_final, config.noutembed),
                     'decoderToOutEmbed'))
             :add(self:makeDropout(config.dropout_out))
-        
 
-        --
         local outmodIn
         if targetVocab then
             local map = self:makeTargetMappingWithSelection(config)
@@ -804,11 +763,6 @@ FConvDenseMoptModel.makeDecoderLM = argcheck{
         local tokens, positions = targetIn:split(2)
 
         local targetEmbedmodel = self:makeEmbedding(config, config.dict, config.dropout_tgt)
-        --need to use the same dictionary before sharing.
-        --targetEmbedmodel:share(self.embed, 'weight', 'bias')
-
-        --local targetEmbed = self:makeEmbedding(config, config.dict,
-        --    config.dropout_tgt)({tokens, positions}):annotate({name = 'decoderEmbed'})
         local targetEmbed = targetEmbedmodel({tokens, positions}):annotate({name = 'decoderEmbed'})
 
         local attnlayers = attentionLayers(#config.nlmhids, config.attnlayers)
@@ -824,38 +778,13 @@ FConvDenseMoptModel.makeDecoderLM = argcheck{
 
             local nhidin_real = config.numhid.decIn[i]
             local nhidout_real = config.numhid.decOut[i]
-            --[[
-            if config.opt == 0 then
-                nhidin_real = nhidin
-                nhidout_real = nhidout 
-            elseif config.opt == 1 then
-                nhidin_real = nhidin + 2 * ((i-1)%config.blocklength) * config.nhid_acc_dec
-                nhidout_real = nhidout + 2 * ((i-1)%config.blocklength+1) * config.nhid_acc_dec
-            elseif config.opt == 2 then
-                nhidin_real = nhidin + ((i-1)%config.blocklength) * config.nhid_acc_dec
-                nhidout_real = nhidout + ((i-1)%config.blocklength+1) * config.nhid_acc_dec
-            elseif config.opt == 3 or config.opt == 4 then
-                if i%config.blocklength == 1 then
-                    nhidin_real = nhidin
-                else
-                    nhidin_real = 2 * config.nhid_acc_dec
-                end
-                nhidout_real = 2 * config.nhid_acc_dec
-            end
-            --]]
-            
-            --
             if config.opt == 3 or config.opt == 4 then
                 inpmap = self:makeModuleName(
                     nn.Bottle(
                         self:makeLinear(nhidin_real, config.nhid_accs_dec[i], config.dropout_hid)),
                     'decoderConv_inpmap_' .. i)
             end
-            --]]
-
-            
             -- Convolutional layer + GLU
-
             local convout 
             if config.opt == 0 or (i-config.keeplayers_dec) % config.blocklength == 0 then 
                 convout = nhidout_real
@@ -865,7 +794,6 @@ FConvDenseMoptModel.makeDecoderLM = argcheck{
 
             local inpmap = nn.Identity()
 
-            --
             if (config.opt == 0 and nhidin ~= nhidout)  then
 
                 inpmap = self:makeModuleName(
@@ -881,7 +809,6 @@ FConvDenseMoptModel.makeDecoderLM = argcheck{
                     'decoderConv_inpmap_' .. i)
 
             end
-            --]]
 
             local lmIn = inpmap(lmOut)
 
@@ -924,11 +851,8 @@ FConvDenseMoptModel.makeDecoderLM = argcheck{
             --end
 
             if config.densebn then
-                --lmIn = 
-                --lmConv = 
                 lmAtt = nn.Bottle(nn.LayerNormalization(convout))(lmAtt)
             end
-            --
             if config.opt == 0 or (i-config.keeplayers_dec) % config.blocklength == 0 then
                 lmOut = nn.CAddTableMulConstant(math.sqrt(0.5))({lmIn, 
                     nn.CAddTableMulConstant(math.sqrt(0.5))({lmAtt, lmConv})})
@@ -944,11 +868,7 @@ FConvDenseMoptModel.makeDecoderLM = argcheck{
                 lmOut = nn.JoinTable(3)({lmConv,
                     nn.CAddTableMulConstant(math.sqrt(0.5))({lmIn, lmAtt})})
             end
-            --]]
             
-            -- residual connection
-            --lmOut = nn.CAddTableMulConstant(math.sqrt(0.5))({lmIn, lmOut})
-            --lmOut = nn.JoinTable(3)({lmOut, lmIn})
         end
 
         return nn.gModule({input}, {lmOut})
