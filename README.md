@@ -1,4 +1,4 @@
-# Introduction
+# Dense Information Flow for Neural Machine Translation
 This is an implementation of the DenseNMT architecture described in the paper **Dense Information Flow for Neural Machine Translation**:
 ```
 @inproceedings{shen2018dense,
